@@ -134,8 +134,10 @@ def _best_preset_match(wtg_model: str, preset_names: list[str]) -> str | None:
 
 
 def _noise_hash(wtg_coords: dict, Lw_bands: dict, hub_height: float,
-                resolution: int, buffer_m: float, hr: float, G: float) -> str:
-    key = f"{sorted(wtg_coords.items())}{sorted(Lw_bands.items())}{hub_height}{resolution}{buffer_m}{hr}{G}"
+                resolution: int, buffer_m: float, hr: float, G: float,
+                terrain_mode: str, use_shielding: bool) -> str:
+    key = (f"{sorted(wtg_coords.items())}{sorted(Lw_bands.items())}"
+           f"{hub_height}{resolution}{buffer_m}{hr}{G}{terrain_mode}{use_shielding}")
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
@@ -215,6 +217,9 @@ with st.sidebar:
         noise_hr         = 4.0
         noise_G          = 0.5
         noise_levels     = [35.0, 40.0, 45.0]
+        terrain_mode     = 'Flat (fast)'
+        terrain_xyz_file = None
+        use_shielding    = False
     else:
         noise_enabled    = st.toggle('Enable noise contour overlays', value=True)
         noise_resolution = st.slider(
@@ -238,6 +243,26 @@ with st.sidebar:
         except ValueError:
             noise_levels = [35.0, 40.0, 45.0]
             st.warning('Invalid contour levels — using 35, 40, 45 dB(A).')
+
+        st.caption('**Terrain**')
+        terrain_mode = st.radio(
+            'Terrain model',
+            ['Flat (fast)', 'SRTM auto-download', 'Upload XYZ CSV'],
+            help='SRTM downloads 30 m elevation via OpenTopoData (~30–60 s). '
+                 'Upload your own XYZ CSV (columns X, Y, Z in the same UTM zone).',
+        )
+        terrain_xyz_file = None
+        if terrain_mode == 'Upload XYZ CSV':
+            terrain_xyz_file = st.file_uploader(
+                'Terrain XYZ CSV', type=['csv', 'txt', 'xyz'],
+                help='Columns: X, Y, Z — projected metres, same UTM zone as your site.',
+            )
+        use_shielding = st.checkbox(
+            'Terrain shielding (ISO 9613-2 §8)',
+            value=False,
+            help='Accounts for hills/ridges blocking noise paths. '
+                 'Requires SRTM or uploaded terrain.',
+        )
 
     st.divider()
 
@@ -387,12 +412,31 @@ if uploaded:
     noise_overlays: list[dict | None] = [None] * len(datasets)
 
     if noise_enabled and any(lw is not None for lw in noise_Lw_per_calc):
+        # Parse terrain XYZ upload once (shared across all calcs)
+        terrain_xyz_df = None
+        if terrain_mode == 'Upload XYZ CSV' and terrain_xyz_file is not None:
+            try:
+                terrain_xyz_df = pd.read_csv(terrain_xyz_file)
+                terrain_xyz_df.columns = [c.strip().upper() for c in terrain_xyz_df.columns]
+                if not {'X', 'Y', 'Z'}.issubset(terrain_xyz_df.columns):
+                    st.warning('Terrain XYZ file must have X, Y, Z columns — ignoring.')
+                    terrain_xyz_df = None
+            except Exception as _xe:
+                st.warning(f'Could not read terrain file: {_xe}')
+
+        use_terrain = terrain_mode != 'Flat (fast)'
+        srtm_mode   = terrain_mode == 'SRTM auto-download'
+
         to_compute = [
             i for i, (d, lw) in enumerate(zip(datasets, noise_Lw_per_calc))
             if lw is not None and d.get('wtg_coords')
         ]
         if to_compute:
-            with st.spinner(f'Computing noise grid(s) for {len(to_compute)} calculation(s)…'):
+            spinner_msg = (
+                f'Computing noise grid(s) for {len(to_compute)} calculation(s)'
+                + (' + downloading SRTM terrain…' if srtm_mode else '…')
+            )
+            with st.spinner(spinner_msg):
                 for i in to_compute:
                     d   = datasets[i]
                     lw  = noise_Lw_per_calc[i]
@@ -400,13 +444,16 @@ if uploaded:
                     cache_key = _noise_hash(
                         d['wtg_coords'], lw, hub,
                         noise_resolution, noise_buffer_km * 1000,
-                        noise_hr, noise_G)
+                        noise_hr, noise_G, terrain_mode, use_shielding)
                     if cache_key not in st.session_state.noise_cache:
                         result = compute_noise_overlay(
                             d['wtg_coords'], hub, lw,
                             resolution=noise_resolution,
                             buffer_m=noise_buffer_km * 1000,
-                            hr=noise_hr, G=noise_G)
+                            hr=noise_hr, G=noise_G,
+                            terrain_xyz=terrain_xyz_df,
+                            use_terrain=use_terrain,
+                            use_shielding=use_shielding and use_terrain)
                         st.session_state.noise_cache[cache_key] = result
                     cached = st.session_state.noise_cache[cache_key]
                     if cached is not None:

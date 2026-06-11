@@ -34,7 +34,11 @@ import pdfplumber
 
 _NOISE_IMPORT_ERR = None
 try:
-    from wind_noise_analyser import compute_noise_grid as _compute_noise_grid
+    from wind_noise_analyser import (
+        compute_noise_grid as _compute_noise_grid,
+        fetch_srtm_elevation as _fetch_srtm_elevation,
+        _build_elev_interp,
+    )
     HAS_NOISE = True
 except Exception as _e:
     HAS_NOISE = False
@@ -418,32 +422,84 @@ def _noise_cmap_norm(levels):
 
 def compute_noise_overlay(wtg_coords: dict, hub_height: float, Lw_bands: dict,
                            resolution: int = 150, buffer_m: float = 3000.0,
-                           hr: float = 4.0, G: float = 0.5) -> dict | None:
+                           hr: float = 4.0, G: float = 0.5,
+                           terrain_xyz=None,
+                           use_terrain: bool = False,
+                           use_shielding: bool = False) -> dict | None:
     """
-    Compute a noise grid in Web Mercator (EPSG:3857) from WGS84 WTG coordinates.
-    Returns {xx, yy, noise_grid} or None if prerequisites are unavailable.
-    Uses flat terrain — suitable for preliminary estimates.
+    Compute a noise grid from WGS84 WTG coordinates.
+
+    Auto-detects the UTM zone so distances are accurate, optionally loads
+    SRTM terrain or a user-supplied XYZ DataFrame, then reprojects the
+    finished UTM grid to Web Mercator for satellite-map overlay.
+
+    Parameters
+    ----------
+    terrain_xyz   : pd.DataFrame with X, Y, Z columns (projected to epsg_utm)
+                    or None.  When None and use_terrain=True, SRTM is downloaded.
+    use_terrain   : if False, flat terrain is assumed (fast).
+    use_shielding : apply ISO 9613-2 §8 terrain barrier attenuation.
     """
     if not HAS_NOISE or not HAS_CTX or not wtg_coords:
         return None
     try:
-        lons      = [v[0] for v in wtg_coords.values()]
-        lats      = [v[1] for v in wtg_coords.values()]
-        to_merc   = Transformer.from_crs('EPSG:4326', 'EPSG:3857', always_xy=True)
-        xs, ys    = to_merc.transform(lons, lats)
-        wtg_xy    = np.column_stack([xs, ys])
-        wtg_elevs = np.zeros(len(wtg_xy))
+        from scipy.interpolate import griddata as _griddata
 
-        xmin = min(xs) - buffer_m;  xmax = max(xs) + buffer_m
-        ymin = min(ys) - buffer_m;  ymax = max(ys) + buffer_m
-        xx, yy    = np.meshgrid(np.linspace(xmin, xmax, resolution),
-                                np.linspace(ymin, ymax, resolution))
-        elev_grid = np.zeros_like(xx)
+        lons = [v[0] for v in wtg_coords.values()]
+        lats = [v[1] for v in wtg_coords.values()]
 
-        noise_grid = _compute_noise_grid(
+        # ── Auto-detect UTM zone ──────────────────────────────────────────
+        clon = sum(lons) / len(lons)
+        clat = sum(lats) / len(lats)
+        zone = int((clon + 180) / 6) + 1
+        epsg_utm = (32700 if clat < 0 else 32600) + zone
+
+        # ── WGS84 → UTM ───────────────────────────────────────────────────
+        to_utm  = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_utm}', always_xy=True)
+        xs_utm, ys_utm = to_utm.transform(lons, lats)
+        wtg_xy  = np.column_stack([xs_utm, ys_utm])
+
+        # ── Terrain ───────────────────────────────────────────────────────
+        if terrain_xyz is not None:
+            get_elev  = _build_elev_interp(terrain_xyz)
+            wtg_elevs = get_elev(wtg_xy)
+        elif use_terrain:
+            xyz_df    = _fetch_srtm_elevation(
+                wtg_xy, epsg_utm, buffer_m=buffer_m + 2000, grid_n=40)
+            get_elev  = _build_elev_interp(xyz_df)
+            wtg_elevs = get_elev(wtg_xy)
+        else:
+            get_elev  = None
+            wtg_elevs = np.zeros(len(wtg_xy))
+
+        # ── UTM noise grid ────────────────────────────────────────────────
+        xmin = min(xs_utm) - buffer_m;  xmax = max(xs_utm) + buffer_m
+        ymin = min(ys_utm) - buffer_m;  ymax = max(ys_utm) + buffer_m
+        xx_utm, yy_utm = np.meshgrid(np.linspace(xmin, xmax, resolution),
+                                     np.linspace(ymin, ymax, resolution))
+        grid_pts  = np.column_stack([xx_utm.ravel(), yy_utm.ravel()])
+        elev_grid = (get_elev(grid_pts).reshape(xx_utm.shape)
+                     if get_elev is not None else np.zeros_like(xx_utm))
+
+        noise_utm = _compute_noise_grid(
             wtg_xy, wtg_elevs, Lw_bands, hub_height,
-            xx, yy, elev_grid, hr=hr, G=G)
-        return {'xx': xx, 'yy': yy, 'noise_grid': noise_grid}
+            xx_utm, yy_utm, elev_grid,
+            hr=hr, G=G, use_shielding=use_shielding)
+
+        # ── Reproject UTM → Web Mercator for satellite map overlay ────────
+        to_merc     = Transformer.from_crs(f'EPSG:{epsg_utm}', 'EPSG:3857', always_xy=True)
+        xm, ym      = to_merc.transform(xx_utm.ravel(), yy_utm.ravel())
+        xx_merc, yy_merc = np.meshgrid(np.linspace(xm.min(), xm.max(), resolution),
+                                        np.linspace(ym.min(), ym.max(), resolution))
+        noise_merc  = _griddata(
+            np.column_stack([xm, ym]),
+            noise_utm.ravel(),
+            np.column_stack([xx_merc.ravel(), yy_merc.ravel()]),
+            method='linear',
+        ).reshape(xx_merc.shape)
+
+        return {'xx': xx_merc, 'yy': yy_merc, 'noise_grid': noise_merc,
+                'epsg_utm': epsg_utm}
     except Exception:
         return None
 
@@ -489,13 +545,41 @@ def _render_wtg_map(ax, fig, wtg_coords: dict, wtgs: list[dict],
     # Noise contour overlay — zorder 6, above basemap/shapes, below WTG markers
     if noise_overlay and coord_is_meters:
         try:
-            lvls        = noise_overlay.get('contour_levels', [35, 40, 45])
+            lvls           = noise_overlay.get('contour_levels', [35, 40, 45])
             cmap_n, norm_n = _noise_cmap_norm(lvls)
-            ax.contourf(noise_overlay['xx'], noise_overlay['yy'], noise_overlay['noise_grid'],
-                        levels=lvls, cmap=cmap_n, norm=norm_n, alpha=0.45, zorder=6, extend='both')
-            cl = ax.contour(noise_overlay['xx'], noise_overlay['yy'], noise_overlay['noise_grid'],
-                            levels=lvls, colors='white', linewidths=0.8, alpha=0.85, zorder=6)
-            ax.clabel(cl, fmt='%g dB(A)', fontsize=4.5, inline=True)
+            xx_n  = noise_overlay['xx']
+            yy_n  = noise_overlay['yy']
+            ng    = noise_overlay['noise_grid']
+
+            # Filled bands
+            ax.contourf(xx_n, yy_n, ng, levels=lvls,
+                        cmap=cmap_n, norm=norm_n, alpha=0.45, zorder=6, extend='both')
+            # Coloured outlines matching each band
+            colours_n = [cmap_n(norm_n(lv + 0.01)) for lv in lvls]
+            for lv, col in zip(lvls, colours_n):
+                try:
+                    ax.contour(xx_n, yy_n, ng, levels=[lv],
+                               colors=[col], linewidths=1.2, alpha=0.95, zorder=7)
+                except Exception:
+                    pass
+            # Inline labels
+            cl = ax.contour(xx_n, yy_n, ng, levels=lvls,
+                            colors='white', linewidths=0.0, alpha=0.0, zorder=7)
+            ax.clabel(cl, fmt='%g dB(A)', fontsize=4.5, inline=True,
+                      manual=False, use_clabeltext=True)
+
+            # Legend patches
+            from matplotlib.patches import Patch as _Patch
+            legend_patches = [
+                _Patch(facecolor=cmap_n(norm_n(lv + 0.01)), edgecolor='white',
+                       alpha=0.75, label=f'{lv:g} dB(A)')
+                for lv in lvls
+            ]
+            ax.legend(handles=legend_patches, loc='lower right',
+                      fontsize=4.5, framealpha=0.6,
+                      title='Noise', title_fontsize=4.5,
+                      facecolor='#1e2a3a', labelcolor='white',
+                      edgecolor='white')
         except Exception:
             pass
 
