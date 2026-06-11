@@ -25,11 +25,18 @@ from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as mpe
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 import pdfplumber
+
+try:
+    from wind_noise_analyser import compute_noise_grid as _compute_noise_grid
+    HAS_NOISE = True
+except ImportError:
+    HAS_NOISE = False
 
 try:
     import fitz  # pymupdf
@@ -393,11 +400,57 @@ def _make_wtg_marker() -> MplPath:
 
 _WTG_MARKER = _make_wtg_marker()
 
+# ── Noise contour colours (green → yellow → orange → red → purple) ────────────
+_NOISE_COLOURS = [
+    '#27ae60', '#a9d65d', '#f9ca24', '#f0932b', '#eb4d4b', '#8e44ad', '#2d3436',
+]
+
+
+def _noise_cmap_norm(levels):
+    n      = len(levels) - 1
+    colors = (_NOISE_COLOURS * ((n // len(_NOISE_COLOURS)) + 1))[:n]
+    cmap   = mcolors.ListedColormap(colors)
+    norm   = mcolors.BoundaryNorm(levels, len(colors))
+    return cmap, norm
+
+
+def compute_noise_overlay(wtg_coords: dict, hub_height: float, Lw_bands: dict,
+                           resolution: int = 150, buffer_m: float = 3000.0,
+                           hr: float = 4.0, G: float = 0.5) -> dict | None:
+    """
+    Compute a noise grid in Web Mercator (EPSG:3857) from WGS84 WTG coordinates.
+    Returns {xx, yy, noise_grid} or None if prerequisites are unavailable.
+    Uses flat terrain — suitable for preliminary estimates.
+    """
+    if not HAS_NOISE or not HAS_CTX or not wtg_coords:
+        return None
+    try:
+        lons      = [v[0] for v in wtg_coords.values()]
+        lats      = [v[1] for v in wtg_coords.values()]
+        to_merc   = Transformer.from_crs('EPSG:4326', 'EPSG:3857', always_xy=True)
+        xs, ys    = to_merc.transform(lons, lats)
+        wtg_xy    = np.column_stack([xs, ys])
+        wtg_elevs = np.zeros(len(wtg_xy))
+
+        xmin = min(xs) - buffer_m;  xmax = max(xs) + buffer_m
+        ymin = min(ys) - buffer_m;  ymax = max(ys) + buffer_m
+        xx, yy    = np.meshgrid(np.linspace(xmin, xmax, resolution),
+                                np.linspace(ymin, ymax, resolution))
+        elev_grid = np.zeros_like(xx)
+
+        noise_grid = _compute_noise_grid(
+            wtg_xy, wtg_elevs, Lw_bands, hub_height,
+            xx, yy, elev_grid, hr=hr, G=G)
+        return {'xx': xx, 'yy': yy, 'noise_grid': noise_grid}
+    except Exception:
+        return None
+
 
 def _render_wtg_map(ax, fig, wtg_coords: dict, wtgs: list[dict],
                     xs: list, ys: list, dpi: int,
                     rotor_m: float = 0, coord_is_meters: bool = True,
-                    shapes: list | None = None) -> bytes:
+                    shapes: list | None = None,
+                    noise_overlay: dict | None = None) -> bytes:
     """
     Shared render: scatter WTG markers + labels + 3D circles onto ax/fig,
     then return PNG bytes.  xs/ys are already in the axes coordinate system
@@ -430,6 +483,19 @@ def _render_wtg_map(ax, fig, wtg_coords: dict, wtgs: list[dict],
                               zorder=7)
             except Exception:
                 pass
+
+    # Noise contour overlay — zorder 6, above basemap/shapes, below WTG markers
+    if noise_overlay and coord_is_meters:
+        try:
+            lvls        = noise_overlay.get('contour_levels', [35, 40, 45])
+            cmap_n, norm_n = _noise_cmap_norm(lvls)
+            ax.contourf(noise_overlay['xx'], noise_overlay['yy'], noise_overlay['noise_grid'],
+                        levels=lvls, cmap=cmap_n, norm=norm_n, alpha=0.45, zorder=6, extend='both')
+            cl = ax.contour(noise_overlay['xx'], noise_overlay['yy'], noise_overlay['noise_grid'],
+                            levels=lvls, colors='white', linewidths=0.8, alpha=0.85, zorder=6)
+            ax.clabel(cl, fmt='%g dB(A)', fontsize=4.5, inline=True)
+        except Exception:
+            pass
 
     ax.scatter(xs, ys,
                marker=_WTG_MARKER, s=s, c=colours,
@@ -488,7 +554,8 @@ def _render_wtg_map(ax, fig, wtg_coords: dict, wtgs: list[dict],
 
 def _plain_map_bytes(wtg_coords: dict, wtgs: list[dict],
                      width_in: float, height_in: float, dpi: int,
-                     rotor_m: float = 0, shapes: list | None = None) -> bytes | None:
+                     rotor_m: float = 0, shapes: list | None = None,
+                     noise_overlay: dict | None = None) -> bytes | None:
     """
     Fallback map — WTG symbols on a dark background using raw lon/lat
     (no pyproj projection).  Used when contextily/pyproj are unavailable
@@ -509,7 +576,7 @@ def _plain_map_bytes(wtg_coords: dict, wtgs: list[dict],
         ax.set_aspect('auto')
         return _render_wtg_map(ax, fig, wtg_coords, wtgs, lons, lats, dpi,
                                rotor_m=rotor_m, coord_is_meters=False,
-                               shapes=shapes)
+                               shapes=shapes, noise_overlay=None)
     except Exception:
         return None
 
@@ -517,7 +584,8 @@ def _plain_map_bytes(wtg_coords: dict, wtgs: list[dict],
 def satellite_map_bytes(wtg_coords: dict, wtgs: list[dict],
                         width_in: float, height_in: float,
                         dpi: int = 150, rotor_m: float = 0,
-                        shapes: list | None = None) -> bytes | None:
+                        shapes: list | None = None,
+                        noise_overlay: dict | None = None) -> bytes | None:
     """
     Satellite basemap (ESRI World Imagery) with 3-bladed WTG symbols
     coloured green→red by wake loss.
@@ -529,7 +597,7 @@ def satellite_map_bytes(wtg_coords: dict, wtgs: list[dict],
 
     if not HAS_CTX:
         return _plain_map_bytes(wtg_coords, wtgs, width_in, height_in, dpi,
-                                rotor_m=rotor_m, shapes=shapes)
+                                rotor_m=rotor_m, shapes=shapes, noise_overlay=noise_overlay)
 
     try:
         to_merc = Transformer.from_crs('EPSG:4326', 'EPSG:3857', always_xy=True)
@@ -558,21 +626,23 @@ def satellite_map_bytes(wtg_coords: dict, wtgs: list[dict],
         return _render_wtg_map(ax, fig, wtg_coords, wtgs,
                                list(xs_wtg), list(ys_wtg), dpi,
                                rotor_m=rotor_m, coord_is_meters=True,
-                               shapes=shapes)
+                               shapes=shapes, noise_overlay=noise_overlay)
 
     except Exception:
         # Projection pipeline failed — fall back to plain lon/lat map
         return _plain_map_bytes(wtg_coords, wtgs, width_in, height_in, dpi,
-                                rotor_m=rotor_m, shapes=shapes)
+                                rotor_m=rotor_m, shapes=shapes, noise_overlay=None)
 
 
 def map_image_bytes(wtg_coords: dict, wtgs: list[dict],
                     width_in: float, height_in: float,
                     rotor_m: float = 0,
-                    shapes: list | None = None) -> bytes | None:
+                    shapes: list | None = None,
+                    noise_overlay: dict | None = None) -> bytes | None:
     """Custom WTG map (satellite or plain dark). No PDF fallback ever."""
     return satellite_map_bytes(wtg_coords, wtgs, width_in, height_in,
-                               rotor_m=rotor_m, shapes=shapes)
+                               rotor_m=rotor_m, shapes=shapes,
+                               noise_overlay=noise_overlay)
 
 
 def wake_chart_bytes(wtgs: list[dict], avg_pct: float,
@@ -806,7 +876,8 @@ def add_cover_slide(prs: Presentation, title: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_calc_slide(prs: Presentation, d: dict, pdf_path: str,
-                   blank_layout, losses: dict, shapes: list | None = None):
+                   blank_layout, losses: dict, shapes: list | None = None,
+                   noise_overlay: dict | None = None):
     """
     Proportional layout respecting the template header/footer zones:
       Left  ~48%  – Key Metrics table  +  Per-WTG Wake Loss chart
@@ -835,7 +906,7 @@ def add_calc_slide(prs: Presentation, d: dict, pdf_path: str,
     # ── Right panel: satellite map (never PDF) ────────────────────────────
     img = map_image_bytes(d.get('wtg_coords', {}), d.get('wtgs', []),
                           right_w, ch, rotor_m=d.get('rotor_m') or 0,
-                          shapes=shapes)
+                          shapes=shapes, noise_overlay=noise_overlay)
     if img:
         pic = slide.shapes.add_picture(
             io.BytesIO(img),
@@ -1074,7 +1145,8 @@ def build(pdf_paths: list[str],
           cover_subsubtitle: str = '',
           losses_per_pdf: list[dict] | None = None,
           shapes: list | None = None,
-          shapes_per_calc: list[list] | None = None) -> bytes:
+          shapes_per_calc: list[list] | None = None,
+          noise_overlays: list | None = None) -> bytes:
     """
     Extract data from each PDF, build the presentation, return .pptx bytes.
 
@@ -1127,8 +1199,10 @@ def build(pdf_paths: list[str],
 
     # Per-calculation slides
     for i, (data, pdf_str) in enumerate(zip(datasets, pdf_strs)):
-        per_shapes = shapes_per_calc[i] if shapes_per_calc else shapes
-        add_calc_slide(prs, data, pdf_str, blank_layout, losses, shapes=per_shapes)
+        per_shapes  = shapes_per_calc[i]  if shapes_per_calc  else shapes
+        per_noise   = noise_overlays[i]   if noise_overlays   else None
+        add_calc_slide(prs, data, pdf_str, blank_layout, losses,
+                       shapes=per_shapes, noise_overlay=per_noise)
 
     # Summary table slide
     add_summary_slide(prs, datasets, blank_layout, losses)
