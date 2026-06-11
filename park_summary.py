@@ -551,35 +551,32 @@ def _render_wtg_map(ax, fig, wtg_coords: dict, wtgs: list[dict],
             yy_n  = noise_overlay['yy']
             ng    = noise_overlay['noise_grid']
 
-            # Filled bands
-            ax.contourf(xx_n, yy_n, ng, levels=lvls,
-                        cmap=cmap_n, norm=norm_n, alpha=0.45, zorder=6, extend='both')
-            # Coloured outlines matching each band
-            colours_n = [cmap_n(norm_n(lv + 0.01)) for lv in lvls]
+            # Coloured contour lines only (no fill)
+            from matplotlib.lines import Line2D as _Line2D
+            colours_n   = [cmap_n(norm_n(lv + 0.01)) for lv in lvls]
+            legend_lines = []
             for lv, col in zip(lvls, colours_n):
                 try:
                     ax.contour(xx_n, yy_n, ng, levels=[lv],
-                               colors=[col], linewidths=1.2, alpha=0.95, zorder=7)
+                               colors=[col], linewidths=1.4, alpha=0.95, zorder=7)
+                    legend_lines.append(
+                        _Line2D([0], [0], color=col, linewidth=1.4,
+                                label=f'{lv:g} dB(A)'))
                 except Exception:
                     pass
+
             # Inline labels
             cl = ax.contour(xx_n, yy_n, ng, levels=lvls,
                             colors='white', linewidths=0.0, alpha=0.0, zorder=7)
             ax.clabel(cl, fmt='%g dB(A)', fontsize=4.5, inline=True,
                       manual=False, use_clabeltext=True)
 
-            # Legend patches
-            from matplotlib.patches import Patch as _Patch
-            legend_patches = [
-                _Patch(facecolor=cmap_n(norm_n(lv + 0.01)), edgecolor='white',
-                       alpha=0.75, label=f'{lv:g} dB(A)')
-                for lv in lvls
-            ]
-            ax.legend(handles=legend_patches, loc='lower right',
-                      fontsize=4.5, framealpha=0.6,
-                      title='Noise', title_fontsize=4.5,
-                      facecolor='#1e2a3a', labelcolor='white',
-                      edgecolor='white')
+            if legend_lines:
+                ax.legend(handles=legend_lines, loc='lower right',
+                          fontsize=4.5, framealpha=0.6,
+                          title='Noise', title_fontsize=4.5,
+                          facecolor='#1e2a3a', labelcolor='white',
+                          edgecolor='white')
         except Exception:
             pass
 
