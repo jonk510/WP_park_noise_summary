@@ -32,11 +32,13 @@ import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 import pdfplumber
 
+_NOISE_IMPORT_ERR = None
 try:
     from wind_noise_analyser import compute_noise_grid as _compute_noise_grid
     HAS_NOISE = True
-except ImportError:
+except Exception as _e:
     HAS_NOISE = False
+    _NOISE_IMPORT_ERR = str(_e)
 
 try:
     import fitz  # pymupdf

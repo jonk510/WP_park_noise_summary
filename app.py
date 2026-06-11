@@ -19,7 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from park_summary import (
-    DEFAULT_LOSSES, HAS_CTX, HAS_GPD, HAS_NOISE,
+    DEFAULT_LOSSES, HAS_CTX, HAS_GPD, HAS_NOISE, _NOISE_IMPORT_ERR,
     _ordinal, apply_losses, build, compute_noise_overlay, extract, load_shapefile,
 )
 
@@ -183,14 +183,17 @@ with st.sidebar:
             help='Each .zip must contain .shp + .dbf + .shx. '
                  'Select which to display per calculation in the main area.',
         )
-        for f in (shp_uploads or []):
-            tmp_path = os.path.join(TMP, f'shp_{f.name}')
+        for idx, f in enumerate(shp_uploads or []):
+            tmp_path = os.path.join(TMP, f'shp_{idx}_{f.name}')
             if not os.path.exists(tmp_path):
                 with open(tmp_path, 'wb') as fp:
                     fp.write(f.read())
             gdf = load_shapefile(tmp_path)
             if gdf is not None:
-                shapes_available[f.name.removesuffix('.zip')] = gdf
+                label = f.name.removesuffix('.zip')
+                if label in shapes_available:
+                    label = f'{label} ({idx + 1})'
+                shapes_available[label] = gdf
             else:
                 st.warning(f'Could not read {f.name} — check it contains a valid shapefile.')
         if shapes_available:
@@ -202,7 +205,8 @@ with st.sidebar:
     st.subheader('Noise Settings')
     if not (HAS_NOISE and HAS_CTX):
         if not HAS_NOISE:
-            st.caption('ℹ  `wind_noise_analyser` not importable — noise overlays disabled.')
+            msg = f'ℹ  Noise import failed: `{_NOISE_IMPORT_ERR}`' if _NOISE_IMPORT_ERR else 'ℹ  `wind_noise_analyser` not importable.'
+            st.caption(msg)
         else:
             st.caption('ℹ  Install `contextily` to enable noise overlays.')
         noise_enabled    = False
