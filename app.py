@@ -63,6 +63,12 @@ st.set_page_config(
     layout='wide',
 )
 
+# Make the shared library importable when running locally (not pip-installed).
+try:
+    import shared as _shared_pkg  # noqa: F401
+except ModuleNotFoundError:
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from shared.style import apply_theme, page_header
 apply_theme()
 page_header(
