@@ -9,6 +9,8 @@ wake-loss charts, and a comparison table.
 import hashlib
 import os
 import re
+import sys
+
 import tempfile
 from datetime import date
 from difflib import SequenceMatcher
@@ -61,10 +63,12 @@ st.set_page_config(
     layout='wide',
 )
 
-st.title('WindPRO PARK + Noise Results Summary')
-st.caption(
-    'Upload WindPRO PARK PDF exports to generate a comparison presentation '
-    'with satellite maps, noise contours, wake-loss charts, and a summary table.'
+from shared.style import apply_theme, page_header
+apply_theme()
+page_header(
+    "WindPRO PARK + Noise Results Summary",
+    "Upload WindPRO PARK PDF exports to generate a comparison presentation "
+    "with satellite maps, noise contours, wake-loss charts, and a summary table.",
 )
 
 caps = []
@@ -84,35 +88,9 @@ st.caption('  ·  '.join(caps))
 # Noise preset loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data
-def _load_wtg_presets() -> dict:
-    """Return {display_name: (data_dict {freq: Lwa_dB}, is_third_oct)}."""
-    if not _SPECTRA_FILE.exists():
-        return {}
-    try:
-        xl = pd.ExcelFile(_SPECTRA_FILE)
-        presets = {}
-        for sheet in xl.sheet_names:
-            df       = xl.parse(sheet)
-            freq_col = next((c for c in df.columns if 'freq' in c.lower()), None)
-            lw_col   = next((c for c in df.columns if 'lw'   in c.lower()), None)
-            if freq_col is None or lw_col is None:
-                continue
-            df = df.dropna(subset=[lw_col])
-            if df.empty:
-                continue
-            data     = {float(r[freq_col]): float(r[lw_col]) for _, r in df.iterrows()}
-            oct_set  = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0}
-            is_third = any(f not in oct_set for f in data.keys())
-            name     = (sheet.replace('_1-3oct', '').replace('_1-1oct', '')
-                             .replace('_', ' '))
-            presets[name] = (data, is_third)
-        return presets
-    except Exception:
-        return {}
+from shared.wtg_presets import load_wtg_presets as _load_wtg_presets
 
-
-_WTG_PRESETS = _load_wtg_presets()
+_WTG_PRESETS = _load_wtg_presets(str(_SPECTRA_FILE))
 
 
 def _best_preset_match(wtg_model: str, preset_names: list[str]) -> str | None:
