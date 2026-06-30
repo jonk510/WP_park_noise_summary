@@ -8,6 +8,12 @@ import sys
 import tempfile
 import warnings
 
+try:
+    import shared as _shared_pkg  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.wtg_presets import load_wtg_presets as _load_wtg_presets
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -128,37 +134,6 @@ def _load_kmz_points(uploaded_file, target_epsg: int):
     xs, ys = transformer.transform(lons, lats)
     return np.column_stack([xs, ys]), names
 
-
-# ── Load turbine presets from Excel if present ────────────────────────────────
-_SPECTRA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "WTG_Acoustic_Spectra_Loudest_Modes 1.xlsx")
-
-@st.cache_data
-def _load_wtg_presets():
-    """Return dict {display_name: (data_dict {freq: Lwa_dB}, is_third_oct)}."""
-    if not os.path.exists(_SPECTRA_FILE):
-        return {}
-    try:
-        xl = pd.ExcelFile(_SPECTRA_FILE)
-        presets = {}
-        for sheet in xl.sheet_names:
-            df = xl.parse(sheet)
-            freq_col = next((c for c in df.columns if "freq" in c.lower()), None)
-            lw_col   = next((c for c in df.columns if "lw"   in c.lower()), None)
-            if freq_col is None or lw_col is None:
-                continue
-            df = df.dropna(subset=[lw_col])
-            if df.empty:
-                continue
-            data = {float(r[freq_col]): float(r[lw_col]) for _, r in df.iterrows()}
-            _OCTAVE_SET = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0}
-            is_third = any(f not in _OCTAVE_SET for f in data.keys())
-            # Clean display name: drop suffix, underscores → spaces
-            name = sheet.replace("_1-3oct", "").replace("_1-1oct", "").replace("_", " ")
-            presets[name] = (data, is_third)
-        return presets
-    except Exception:
-        return {}
 
 _WTG_PRESETS = _load_wtg_presets()
 
