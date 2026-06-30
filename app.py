@@ -51,7 +51,6 @@ _check_password()
 
 _BUNDLED_TPL  = Path(__file__).parent / 'template01.pptx'
 DEFAULT_TPL   = str(_BUNDLED_TPL) if _BUNDLED_TPL.exists() else None
-_SPECTRA_FILE = Path(__file__).parent / 'WTG_Acoustic_Spectra_Loudest_Modes 1.xlsx'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -96,7 +95,7 @@ st.caption('  ·  '.join(caps))
 
 from shared.wtg_presets import load_wtg_presets as _load_wtg_presets
 
-_WTG_PRESETS = _load_wtg_presets(str(_SPECTRA_FILE))
+_WTG_PRESETS = _load_wtg_presets()
 
 
 def _best_preset_match(wtg_model: str, preset_names: list[str]) -> str | None:
